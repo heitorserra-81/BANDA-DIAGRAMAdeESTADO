@@ -1,0 +1,10 @@
+import {env} from 'cloudflare:workers';
+import {cookies} from 'next/headers';
+import {getChatGPTUser} from '../app/chatgpt-auth';
+const enc=new TextEncoder();
+const hex=(b:ArrayBuffer)=>Array.from(new Uint8Array(b),x=>x.toString(16).padStart(2,'0')).join('');
+export async function passwordHash(password:string,salt:string){const key=await crypto.subtle.importKey('raw',enc.encode(password),'PBKDF2',false,['deriveBits']);return hex(await crypto.subtle.deriveBits({name:'PBKDF2',salt:enc.encode(salt),iterations:100000,hash:'SHA-256'},key,256));}
+export async function accessSettings(){const row=await env.DB!.prepare("SELECT data FROM records WHERE id='band-access'").first<{data:string}>();if(row)return JSON.parse(row.data);const salt=crypto.randomUUID();const data={salt,hash:await passwordHash('1234',salt),secret:crypto.randomUUID()+crypto.randomUUID(),version:1};await env.DB!.prepare("INSERT OR IGNORE INTO records(id,kind,data) VALUES('band-access','private-auth',?)").bind(JSON.stringify(data)).run();return JSON.parse((await env.DB!.prepare("SELECT data FROM records WHERE id='band-access'").first<{data:string}>())!.data);}
+async function signature(payload:string,secret:string){const key=await crypto.subtle.importKey('raw',enc.encode(secret),{name:'HMAC',hash:'SHA-256'},false,['sign']);return hex(await crypto.subtle.sign('HMAC',key,enc.encode(payload)));}
+export async function unlocked(){const u=await getChatGPTUser();if(!u)return false;const raw=(await cookies()).get('band_session')?.value;if(!raw)return false;const [expires,version,sig]=raw.split('.');if(!sig||Number(expires)<Date.now())return false;const s=await accessSettings();return Number(version)===s.version&&sig===await signature(`${u.userId}.${expires}.${version}`,s.secret);}
+export async function sessionCookie(){const u=await getChatGPTUser();const s=await accessSettings();const expires=Date.now()+7*86400000;return `band_session=${expires}.${s.version}.${await signature(`${u!.userId}.${expires}.${s.version}`,s.secret)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800`;}
